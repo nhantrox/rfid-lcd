@@ -12,12 +12,17 @@
 #include <WebServer.h>
 #include <LittleFS.h>
 #include <ArduinoJson.h>
+#include <LiquidCrystal_I2C.h>
 #include "webpage.h"
 
 // --- PHAN 1: CAU HINH PHAN CUNG ---
-#define RST_PIN   22
+#define RST_PIN   4     // Da doi tu 22 sang 4 (vi GPIO 22 = SCL cho LCD I2C)
 #define SS_PIN    5
 MFRC522 mfrc522(SS_PIN, RST_PIN);
+
+// --- LCD I2C ---
+// Dia chi 0x27, LCD 16 cot x 2 hang
+LiquidCrystal_I2C lcd(0x27, 16, 2);
 
 // --- PHAN 2: CAU HINH WIFI ---
 // *** HAY SUA THANH WIFI NHA BAN ***
@@ -32,6 +37,92 @@ const char* userFile = "/users.json";
 String lastScannedUID = "";
 bool   lastCardKnown  = false;
 String lastCardUser   = "";
+
+// --- QUAN LY TRANG THAI LCD ---
+#define LCD_SHOW_DURATION 3000  // Hien thi ket qua 3 giay
+bool   lcdShowingResult = false;
+unsigned long lcdShowTime = 0;
+
+// Hieu ung dau cham dong man hinh cho
+#define DOT_INTERVAL 500  // Them 1 cham moi 500ms
+unsigned long lastDotTime = 0;
+byte dotCount = 0;
+
+// Hieu ung scroll ten dai
+#define SCROLL_INTERVAL 400  // Cuon 1 ky tu moi 400ms
+String scrollText = "";
+int    scrollPos  = 0;
+unsigned long lastScrollTime = 0;
+bool   isScrolling = false;
+
+void lcdShowIdle() {
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("  RFID System   ");
+  lcd.setCursor(0, 1);
+  lcd.print("Quet the ");
+  dotCount = 0;
+  lastDotTime = millis();
+}
+
+void lcdUpdateDots() {
+  if (lcdShowingResult) return;  // Dang hien ket qua, khong update
+  if (millis() - lastDotTime < DOT_INTERVAL) return;
+  lastDotTime = millis();
+
+  dotCount = (dotCount % 4) + 1;  // 1 -> 2 -> 3 -> 4 -> 1 ...
+  lcd.setCursor(9, 1);             // Vi tri sau "Quet the "
+  for (byte i = 0; i < 4; i++) {
+    lcd.print(i < dotCount ? "." : " ");
+  }
+}
+
+void lcdShowResult(bool known, const String& name, const String& uid) {
+  lcd.clear();
+  if (known) {
+    lcd.setCursor(0, 0);
+    lcd.print("Xin chao!");
+    if (name.length() <= 16) {
+      // Ten ngan: hien thi binh thuong
+      lcd.setCursor(0, 1);
+      lcd.print(name);
+      isScrolling = false;
+    } else {
+      // Ten dai: bat dau scroll
+      scrollText = name + "   ";  // Them khoang cach de lap lai dep
+      scrollPos  = 0;
+      isScrolling = true;
+      lastScrollTime = millis();
+      lcd.setCursor(0, 1);
+      lcd.print(scrollText.substring(0, 16));
+    }
+  } else {
+    lcd.setCursor(0, 0);
+    lcd.print("Chua dang ky!");
+    lcd.setCursor(0, 1);
+    lcd.print(uid.substring(0, 11));
+    isScrolling = false;
+  }
+  lcdShowingResult = true;
+  lcdShowTime = millis();
+}
+
+void lcdUpdateScroll() {
+  if (!lcdShowingResult || !isScrolling) return;
+  if (millis() - lastScrollTime < SCROLL_INTERVAL) return;
+  lastScrollTime = millis();
+
+  scrollPos++;
+  if (scrollPos > (int)scrollText.length()) scrollPos = 0;
+
+  // Lay 16 ky tu tu vi tri scrollPos (vong tron)
+  String display = "";
+  String looped  = scrollText + scrollText;  // Lap vong
+  display = looped.substring(scrollPos, scrollPos + 16);
+
+  lcd.setCursor(0, 1);
+  lcd.print(display);
+}
 
 // ============================================
 // PHAN 4: HAM XU LY DU LIEU NGUOI DUNG
@@ -98,10 +189,12 @@ void handleRFID() {
     lastCardKnown = true;
     lastCardUser  = userName;
     Serial.println(">>> KHOP MA! Xin chao: " + userName);
+    lcdShowResult(true, userName, uid);
   } else {
     lastCardKnown = false;
     lastCardUser  = "";
     Serial.println("!!! THE MOI: " + uid);
+    lcdShowResult(false, "", uid);
   }
 
   Serial.println("UID: " + uid);
@@ -194,6 +287,14 @@ void setup() {
   // 7.1: Khoi tao RFID
   SPI.begin();
   mfrc522.PCD_Init();
+
+  // 7.1b: Khoi tao LCD I2C
+  lcd.init();
+  lcd.backlight();
+  lcd.setCursor(0, 0);
+  lcd.print("RFID System");
+  lcd.setCursor(0, 1);
+  lcd.print("Dang khoi dong..");
   Serial.println("[OK] Module RFID RC522");
 
   // 7.2: Khoi tao bo nho Flash (LittleFS)
@@ -232,6 +333,8 @@ void setup() {
   Serial.println("[OK] Web Server da khoi dong!");
 
   Serial.println("=== HE THONG SAN SANG ===\n");
+
+  lcdShowIdle();
 }
 
 // ============================================
@@ -241,4 +344,16 @@ void setup() {
 void loop() {
   server.handleClient();  // Xu ly yeu cau tu web
   handleRFID();           // Kiem tra the RFID
+
+  // Tu dong quay lai man hinh cho sau LCD_SHOW_DURATION ms
+  if (lcdShowingResult && (millis() - lcdShowTime >= LCD_SHOW_DURATION)) {
+    lcdShowingResult = false;
+    lcdShowIdle();
+  }
+
+  // Cap nhat hieu ung dau cham
+  lcdUpdateDots();
+
+  // Cap nhat hieu ung scroll ten
+  lcdUpdateScroll();
 }
